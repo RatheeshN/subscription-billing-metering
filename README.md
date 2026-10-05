@@ -297,39 +297,3 @@ Next improvements: a transactional ingestion/outbox and explicit period cutoff l
 ## Assignment artifacts
 
 The implementation request is preserved as text in `prompts/implementation-request.txt`. The take-home PDF asks for screenshots of actual AI prompts and a narrated recording; those must be captured from the real chat/IDE and recorded by the submitter. Text is not presented as a substitute screenshot. No repository publication or recruiter submission has been performed.
-
-## Final requirement matrix
-
-PASS below means the implementation was inspected and its behavior was verified by the cited tests or query evidence. The scale requirement evaluates the implemented strategy and documented limitations, not a five-million-row throughput benchmark. Paths are relative to this repository. Test classes are under `tests/Feature` unless marked Unit.
-
-| Interview Requirement | Status | Evidence | Tests |
-| --- | --- | --- | --- |
-| Normalized schema | PASS | `database/migrations/2026_10_01_111525_create_usage_domain_tables.php`, `2026_10_01_114248_create_subscription_billing_tables.php`; live schema/FKs inspected | Service and HTTP suites on MySQL |
-| Correct indexes | PASS | Metering/index migrations; live schema; pending query uses `usage_pending_aggregation`, merchant/date query uses `daily_merchant_date_customer` | MySQL EXPLAIN on demo data |
-| 5M+ event strategy | PASS | Indexed pending chunks, segment/day totals, scale/retention/partitioning discussion above | Query inspection; no 5M load benchmark |
-| POST /usage | PASS | `routes/api.php`, `UsageController`, `RecordUsageRequest`, `RecordUsageAction` | `Http/UsageControllerTest` |
-| High throughput | PASS | Short per-customer transaction; no synchronous billing, aggregation or per-event dispatch | `UsageControllerTest::test_records_usage_and_returns_201_without_synchronous_aggregation`; concurrency suite; hot-customer contention documented |
-| Idempotency | PASS | Unique customer/key constraint; `createOrFirst`; retry payload comparison | Usage HTTP tests; `MySqlConcurrencyTest::test_concurrent_ingestion_creates_only_one_usage_event` |
-| Rate limiting | PASS | `AppServiceProvider` merchant usage limiter; route middleware | `UsageControllerTest::test_rate_limit_returns_429_after_the_configured_tenant_budget` |
-| Repository Pattern | PASS | Domain contracts, Eloquent repositories, `AppServiceProvider` bindings | Real repository queries throughout service/HTTP suites |
-| Queued aggregation | PASS | `AggregateDailyUsageJob` implements `ShouldQueue`; scheduled every minute | `Services/AggregationServiceTest` |
-| Chunked processing | PASS | Bounded pending query; 1,000 events/chunk and 50 chunks/job defaults | Small-chunk, subscription drain and continuation tests |
-| Aggregation retry safety | PASS | Daily unique key; increments and markers share a transaction | Rollback/retry and concurrent worker tests |
-| Billing | PASS | `BillingService`, `BillingCalculator`, invoice repository | `Services/BillingServiceTest`; Unit `Services/BillingCalculatorTest` |
-| Proration | PASS | UTC seconds ratio; half-up base rounding; floored allowance | Mid-cycle, leap-year and rounding tests |
-| Overage | PASS | Nonnegative excess units; micros to minor units using Brick Math | Zero/below/exact/above allowance and fractional-rate tests |
-| Mid-cycle start | PASS | Segment intersection with calendar billing period | `BillingServiceTest::test_subscription_start_mid_cycle_prorates_base_price_and_allowance` |
-| Upgrade | PASS | Effective-dated pricing snapshots; transactional change action | Pricing provider's upgrade case; actual change action plus late usage test |
-| Downgrade | PASS | Same temporal model and original/new rates | Pricing provider's downgrade case; actual change action plus late usage test |
-| Boundary timestamps | PASS | Inclusive starts, exclusive ends; boundary usage selects new segment | Boundary billing test; late-usage action tests; projection boundary test |
-| Invoice idempotency | PASS | Unique subscription/cycle; subscription lock; invoice/lines/cursor transaction | Service/job retries, concurrent billing and write rollback tests |
-| Pricing cache | PASS | Tenant/plan key; scalar cache-aside payload; one-hour TTL | `PlanPricingServiceTest` persistent round-trip and zero-query cache hit |
-| Cache invalidation | PASS | Shared service lock; observer invalidates after commit | Committed update/rollback tests; historical pricing edit billing test |
-| Top 5 dashboard | PASS | Merchant/date SQL SUM, descending units and ID tie-breaker, LIMIT 5 | `DashboardServiceTest::test_top_five_customers_are_ranked_using_monthly_aggregates_and_scoped_to_tenant` |
-| Projected overage | PASS | Actual closed-segment usage; active-segment run rate; per-currency totals | Monthly/currency, segment change, zero-elapsed, yearly and chunk tests |
-| >50% churn risk | PASS | Completed months; positive previous usage; `2 * recent < previous` | 51%, exactly 50%, 49%, absent prior/current and tenant isolation cases |
-| Dashboard scalability | PASS | SQL daily aggregates; lazy subscription chunks; no raw-event query | 101-subscription regression; MySQL EXPLAIN; demo-sized evidence only |
-| Tenant isolation | PASS | Token-derived merchant; scoped repositories, writes and reads | Usage/subscription/invoice/dashboard/cache/browser isolation tests |
-| README | PASS | Setup, architecture, schema, formulas, limits, trade-offs, operation and verified results | N/A; compared with code and actual commands |
-
-The engineering checklist is **27/27 PASS**. Complete assignment delivery still needs a shared GitHub repository, actual prompt screenshots and the submitter's narrated 5–10 minute walkthrough. This local workspace is not a Git checkout; publication/access cannot be verified here. Those submission artifacts are separate from the verified backend behavior.
