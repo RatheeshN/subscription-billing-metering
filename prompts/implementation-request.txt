@@ -1,0 +1,509 @@
+You are a Senior Laravel Engineer.
+
+Build a production-quality Laravel + MySQL backend for a multi-tenant Subscription Billing & Usage-Metering System.
+
+## Architecture
+
+Use a clean Repository Pattern with clear separation of concerns.
+
+Follow approximately this structure:
+
+app/
+├── Actions/
+├── DTOs/
+├── Enums/
+├── Exceptions/
+├── Http/
+│   ├── Controllers/
+│   ├── Requests/
+│   └── Resources/
+├── Jobs/
+├── Models/
+├── Repositories/
+│   ├── Contracts/
+│   └── Eloquent/
+├── Services/
+├── Support/
+└── Providers/
+
+Controllers must remain thin.
+
+Responsibilities:
+
+Controller:
+- validate/request orchestration
+- call Action or Service
+- return API Resource/JSON response
+
+Action:
+- coordinate a single application use case
+
+Service:
+- business logic, especially billing, aggregation, proration, and dashboard calculations
+
+Repository:
+- database access and optimized queries
+
+DTO:
+- typed data transfer between layers
+
+Job:
+- asynchronous/chunked processing
+
+Do not put business logic or large database queries inside controllers.
+
+## Technology
+
+Use:
+
+- Current stable Laravel conventions
+- PHP 8.2+
+- MySQL 8+
+- Redis for cache and queues where appropriate
+- Laravel Queue Jobs
+- Laravel Cache
+- Form Requests
+- API Resources
+- PHPUnit/Pest according to project defaults
+
+Use database transactions where atomicity is required.
+
+Use decimal/integer money handling safely. Do not use floating-point arithmetic for billing.
+
+## Domain
+
+The system is multi-tenant.
+
+Entities:
+
+Merchant
+Plan
+Customer
+Subscription
+SubscriptionSegment or SubscriptionPlanHistory
+UsageEvent
+DailyUsageAggregate
+Invoice
+InvoiceLine
+
+A Merchant has many Plans.
+
+Plan fields should include at least:
+
+- merchant_id
+- name
+- base_price
+- billing_cycle
+- included_usage_units
+- overage_rate_per_unit
+- timestamps
+
+A Customer belongs to a Merchant.
+
+Customers subscribe to a merchant's plan.
+
+Usage Events are recorded per customer and may have very high write volume.
+
+## Database Design
+
+Create normalized Laravel migrations with:
+
+- foreign keys where appropriate
+- unique constraints
+- composite indexes based on actual query patterns
+- appropriate bigint types
+- DECIMAL or integer minor units for money
+- timestamps
+
+Design usage_events specifically for 50 lakh / 5,000,000+ rows and continued growth.
+
+Suggested usage event data:
+
+- id
+- merchant_id
+- customer_id
+- idempotency_key
+- usage_units
+- occurred_at
+- created_at
+
+Create an appropriate UNIQUE constraint to enforce idempotency at database level.
+
+Do not rely only on an application-level "exists" check because concurrent requests could race.
+
+Explain indexing decisions.
+
+Also document future scaling options such as:
+
+- MySQL partitioning by occurred_at
+- archival
+- daily aggregation
+- avoiding expensive scans of raw usage_events for dashboard queries
+
+## Repository Pattern
+
+Create contracts such as:
+
+PlanRepositoryInterface
+SubscriptionRepositoryInterface
+UsageEventRepositoryInterface
+UsageAggregateRepositoryInterface
+InvoiceRepositoryInterface
+DashboardRepositoryInterface
+
+Then create Eloquent implementations.
+
+Example:
+
+Repositories/Contracts/UsageEventRepositoryInterface.php
+Repositories/Eloquent/EloquentUsageEventRepository.php
+
+Bind interfaces to implementations in a Service Provider.
+
+Repositories should expose meaningful domain/query operations instead of simply wrapping every Eloquent method.
+
+Bad:
+
+repository->find()
+repository->create()
+repository->update()
+
+Prefer operations representing actual needs, for example:
+
+recordUsage(...)
+getUsageForAggregation(...)
+getCustomerCycleUsage(...)
+upsertDailyAggregate(...)
+getTopCustomersByUsage(...)
+getProjectedOverage(...)
+getChurnRiskCustomers(...)
+
+Avoid creating unnecessary abstraction purely for the sake of Repository Pattern.
+
+## POST /api/usage
+
+Implement an API endpoint for recording usage.
+
+Example request:
+
+POST /api/usage
+
+{
+    "customer_id": 123,
+    "units": 50,
+    "occurred_at": "2026-09-30T10:30:00Z",
+    "idempotency_key": "evt_abc123"
+}
+
+Requirements:
+
+- Form Request validation
+- merchant/customer ownership validation
+- high-throughput safe
+- idempotent
+- retrying the same idempotency key must not double-count usage
+- database-level unique constraint
+- handle duplicate-key race conditions safely
+- basic Laravel rate limiting
+- minimal synchronous processing
+
+Do not perform expensive aggregation during ingestion.
+
+Return an appropriate HTTP status and JSON structure.
+
+Create:
+
+RecordUsageRequest
+RecordUsageDTO
+RecordUsageAction
+
+and use UsageEventRepositoryInterface.
+
+## Subscription Plan Changes
+
+This is a critical requirement.
+
+A customer may upgrade or downgrade during a billing cycle.
+
+Usage before the plan change must be charged using the original plan.
+
+Usage after the change must use the new plan.
+
+Model subscription pricing as effective-dated segments/history rather than simply overwriting subscription.plan_id.
+
+For example:
+
+subscription_segments
+
+- id
+- subscription_id
+- plan_id
+- starts_at
+- ends_at
+- timestamps
+
+A plan change closes the current segment and opens another segment.
+
+Historical pricing must remain reproducible.
+
+Consider snapshotting billing-relevant plan values into the subscription segment so later edits to a Plan do not retroactively alter historical invoices.
+
+Explain the chosen approach in README.
+
+## Usage Aggregation
+
+Create a queued Job for aggregating usage.
+
+Example:
+
+AggregateDailyUsageJob
+
+Requirements:
+
+- process records in chunks
+- avoid loading large datasets into memory
+- idempotent/re-runnable
+- safely upsert daily aggregates
+- handle retries
+- appropriate indexes
+- explain chunk size choice
+
+Create a daily_usage_aggregates table.
+
+Suggested uniqueness:
+
+merchant_id + customer_id + usage_date + subscription_segment_id
+
+This allows usage to remain associated with the pricing segment that applies at the time it occurred.
+
+## Billing
+
+Create a BillingService.
+
+Billing must calculate:
+
+base price
++
+overage charges
+=
+invoice total
+
+Implement:
+
+included allowance
+overage usage
+overage rate
+proration
+mid-cycle subscription start
+mid-cycle upgrade
+mid-cycle downgrade
+multiple pricing segments in one billing cycle
+
+For each effective subscription segment:
+
+1. determine segment duration within billing cycle
+2. calculate prorated base price
+3. calculate the segment's prorated included allowance according to a clearly documented rule
+4. determine usage belonging to that segment
+5. calculate overage
+6. calculate overage charge
+7. create invoice line(s)
+
+Use a deterministic proration strategy based on time/days and document the exact rule.
+
+Clearly define boundary semantics such as:
+
+starts_at inclusive
+ends_at exclusive
+
+Avoid double-counting usage exactly at a plan-change boundary.
+
+Invoice generation must be safe to retry without creating duplicate invoices.
+
+Use database uniqueness and transactions where appropriate.
+
+## Plan Cache
+
+Cache plan/pricing lookups.
+
+Use Laravel Cache/Redis.
+
+Create something like:
+
+PlanPricingService
+
+Cache key example:
+
+merchant:{merchantId}:plan:{planId}:pricing
+
+Use an explicit TTL.
+
+Implement invalidation when plan pricing changes.
+
+Do not depend only on TTL.
+
+Use model events, observers, or the service responsible for updating a plan to forget the corresponding cache key.
+
+Explain cache-aside strategy and invalidation in README.
+
+## Dashboard
+
+Implement:
+
+GET /api/merchants/{merchant}/dashboard
+
+Return:
+
+1. Top 5 customers by usage this month/current cycle
+2. Projected overage revenue for current cycle
+3. Customers whose usage dropped by more than 50% month-over-month
+
+Example response:
+
+{
+    "top_customers": [],
+    "projected_overage_revenue": 0,
+    "churn_risk_customers": []
+}
+
+Optimize these queries.
+
+Prefer daily_usage_aggregates rather than repeatedly scanning the raw usage_events table.
+
+Keep dashboard query logic in DashboardRepository and/or DashboardService rather than the controller.
+
+Explain the definition/formula used for projected overage revenue.
+
+For churn risk, compare equivalent completed month windows and safely handle customers with zero previous usage.
+
+## Tests
+
+Create comprehensive tests.
+
+At minimum test:
+
+Usage ingestion:
+- records usage
+- duplicate idempotency key does not double-count
+- invalid customer/merchant relationship
+- rate limit behavior where practical
+
+Aggregation:
+- aggregates multiple events correctly
+- rerunning aggregation does not duplicate totals
+- chunk-safe processing
+
+Billing:
+- no overage
+- exact included allowance
+- overage
+- subscription starts mid-cycle
+- proration
+- upgrade mid-cycle
+- downgrade mid-cycle
+- usage exactly at plan-change boundary
+- multiple subscription segments
+- invoice generation retry/idempotency
+- rounding/money edge cases
+
+Dashboard:
+- top five customers
+- projected overage
+- >50% month-over-month usage drop
+
+Prefer factories for test setup.
+
+## Seeders
+
+Create realistic seeders/factories for:
+
+Merchant
+Plans
+Customers
+Subscriptions
+SubscriptionSegments
+UsageEvents
+
+Include enough data to demonstrate the dashboard.
+
+## README
+
+Write a professional README.md containing:
+
+1. Project overview
+2. Architecture
+3. Repository Pattern explanation
+4. Directory structure
+5. Database/schema decisions
+6. Indexing strategy
+7. Handling 5M+ usage-event rows
+8. Usage ingestion flow
+9. Idempotency strategy
+10. Aggregation strategy
+11. Queue/chunking decisions
+12. Billing algorithm
+13. Exact proration formula
+14. Mid-cycle upgrade/downgrade handling
+15. Cache strategy and invalidation
+16. Dashboard query strategy
+17. Rate limiting
+18. Setup instructions
+19. Queue worker instructions
+20. Scheduler/cron instructions
+21. Running tests
+22. Assumptions
+23. Trade-offs made because of the timebox
+24. What would be improved for production
+
+Explicitly document any ambiguity and the assumption selected.
+
+## Code Quality
+
+Use:
+
+- strict type declarations where appropriate
+- constructor dependency injection
+- interfaces
+- typed DTOs
+- enums/value objects where they improve clarity
+- meaningful method names
+- small focused classes
+- transactions where necessary
+- eager loading to prevent N+1 problems
+
+Avoid:
+
+- fat controllers
+- giant services
+- unnecessary generic repositories
+- duplicated billing logic
+- floating-point money calculations
+- N+1 queries
+- scanning millions of raw events for dashboard requests
+- business logic inside models/controllers unless it naturally belongs there
+
+## Implementation Process
+
+First inspect the existing Laravel repository.
+
+Do not overwrite working code unnecessarily.
+
+Then:
+
+1. Summarize the existing project structure.
+2. Produce a concise implementation plan.
+3. Design migrations/schema and indexes.
+4. Implement models and relationships.
+5. Implement repository contracts and Eloquent repositories.
+6. Register repository bindings.
+7. Implement DTOs/Actions/Services.
+8. Implement usage endpoint.
+9. Implement subscription plan-change handling.
+10. Implement aggregation job.
+11. Implement billing/invoice generation.
+12. Implement caching/invalidation.
+13. Implement dashboard.
+14. Add rate limiting.
+15. Add factories/seeders.
+16. Add tests.
+17. Run migrations/tests and fix failures.
